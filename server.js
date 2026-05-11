@@ -19,12 +19,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// ============ SQLITE DATABASE (No external service!) ============
+// SQLITE DATABASE
 const db = new sqlite3.Database('./messaging.db');
 
 // Create tables
 db.serialize(() => {
-  // Users table
   db.run(`CREATE TABLE IF NOT EXISTS users (
     uniqueId TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -32,21 +31,18 @@ db.serialize(() => {
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   
-  // Messages table
   db.run(`CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     fromId TEXT NOT NULL,
     toId TEXT NOT NULL,
     message TEXT NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(fromId) REFERENCES users(uniqueId),
-    FOREIGN KEY(toId) REFERENCES users(uniqueId)
+    isRead INTEGER DEFAULT 0,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   
-  console.log('✅ SQLite database ready (messaging.db)');
+  console.log('✅ SQLite database ready');
 });
 
-// Helper functions
 function generateUniqueId() {
   return Math.floor(10000 + Math.random() * 90000).toString();
 }
@@ -122,7 +118,10 @@ app.get('/api/all-users', (req, res) => {
   
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
-    db.all('SELECT uniqueId, name FROM users WHERE uniqueId != ?', [decoded.uniqueId], (err, users) => {
+    db.all(`SELECT u.uniqueId, u.name, 
+            (SELECT COUNT(*) FROM messages WHERE toId = u.uniqueId AND isRead = 0 AND fromId != ?) as unreadCount
+            FROM users u WHERE u.uniqueId != ?`,
+            [decoded.uniqueId, decoded.uniqueId], (err, users) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(users);
     });
@@ -137,8 +136,11 @@ app.post('/api/messages', (req, res) => {
   if (!token) return res.status(401).json({ error: 'No token' });
   
   try {
-    jwt.verify(token, process.env.JWT_SECRET || 'secret123');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
     const { fromId, toId } = req.body;
+    
+    // Mark messages as read
+    db.run('UPDATE messages SET isRead = 1 WHERE fromId = ? AND toId = ?', [toId, fromId]);
     
     db.all(
       `SELECT * FROM messages 
@@ -163,12 +165,29 @@ app.post('/api/save-message', (req, res) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
     const { toId, message } = req.body;
     
-    db.run('INSERT INTO messages (fromId, toId, message) VALUES (?, ?, ?)',
+    db.run('INSERT INTO messages (fromId, toId, message, isRead) VALUES (?, ?, ?, 0)',
       [decoded.uniqueId, toId, message],
       function(err) {
         if (err) return res.status(500).json({ error: err.message });
         res.json({ success: true });
       });
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+// Get unread count for current user
+app.get('/api/unread-count', (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token' });
+  
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
+    db.get('SELECT COUNT(*) as count FROM messages WHERE toId = ? AND isRead = 0', 
+      [decoded.uniqueId], (err, result) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ unreadCount: result?.count || 0 });
+    });
   } catch {
     res.status(401).json({ error: 'Invalid token' });
   }
@@ -192,24 +211,45 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   console.log(`✅ User connected: ${socket.user?.name}`);
   onlineUsers.set(socket.user?.uniqueId, socket.id);
+  
+  // Send unread count on connect
+  db.get('SELECT COUNT(*) as count FROM messages WHERE toId = ? AND isRead = 0', 
+    [socket.user?.uniqueId], (err, result) => {
+    socket.emit('unread-update', { count: result?.count || 0 });
+  });
 
   socket.on('send-message', async (data) => {
     const { toId, message } = data;
     const fromId = socket.user.uniqueId;
     
-    // Save to SQLite
-    db.run('INSERT INTO messages (fromId, toId, message) VALUES (?, ?, ?)',
+    // Save to database as unread
+    db.run('INSERT INTO messages (fromId, toId, message, isRead) VALUES (?, ?, ?, 0)',
       [fromId, toId, message]);
     
-    // Send if online
-    const recipientSocketId = onlineUsers.get(toId);
-    if (recipientSocketId) {
-      io.to(recipientSocketId).emit('receive-message', {
-        fromId,
-        message,
-        timestamp: new Date()
-      });
-    }
+    // Get sender name
+    db.get('SELECT name FROM users WHERE uniqueId = ?', [fromId], (err, user) => {
+      const senderName = user?.name || fromId;
+      
+      // Send to recipient if online
+      const recipientSocketId = onlineUsers.get(toId);
+      if (recipientSocketId) {
+        io.to(recipientSocketId).emit('receive-message', {
+          fromId,
+          fromName: senderName,
+          message,
+          timestamp: new Date()
+        });
+        
+        // Update unread count for recipient
+        db.get('SELECT COUNT(*) as count FROM messages WHERE toId = ? AND isRead = 0', 
+          [toId], (err, result) => {
+          io.to(recipientSocketId).emit('unread-update', { count: result?.count || 0 });
+        });
+      }
+      
+      // Also update unread count for sender's list
+      socket.emit('message-sent', { success: true });
+    });
   });
 
   socket.on('disconnect', () => {
