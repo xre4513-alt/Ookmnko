@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>5-Digit ID Messenger</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #121212; color: white; padding: 20px; }
+        .container { max-width: 600px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 10px; }
+        input, button, select { width: 100%; padding: 12px; margin: 8px 0; border: none; border-radius: 5px; font-size: 16px; }
+        button { background: #4CAF50; color: white; cursor: pointer; }
+        button:hover { background: #45a049; }
+        button:disabled { background: #666; cursor: not-allowed; }
+        .message { background: #2c2c2c; padding: 10px; margin: 5px 0; border-radius: 5px; }
+        .my-message { background: #4CAF50; text-align: right; }
+        #chatArea, #usersArea { display: none; }
+        #messages { height: 400px; overflow-y: auto; margin: 10px 0; }
+        .error { color: #ff6b6b; margin: 10px 0; padding: 10px; background: #2c2c2c; border-radius: 5px; }
+        .success { color: #51cf66; margin: 10px 0; padding: 10px; background: #2c2c2c; border-radius: 5px; }
+        .user-list { margin: 10px 0; }
+        .user-item { background: #2c2c2c; padding: 10px; margin: 5px 0; border-radius: 5px; cursor: pointer; }
+        .user-item:hover { background: #3c3c3c; }
+        .selected { background: #4CAF50; }
+        .tab { display: flex; gap: 10px; margin-bottom: 20px; }
+        .tab button { background: #333; flex: 1; }
+        .tab button.active { background: #4CAF50; }
+        .logout-btn { background: #ff4444; margin-top: 10px; }
+        .logout-btn:hover { background: #cc0000; }
+    </style>
+</head>
+<body>
+    <div class="container" id="loginArea">
+        <h2>📱 5-Digit ID Messenger</h2>
+        <div id="statusMessage"></div>
+        
+        <h3>Register New Account</h3>
+        <input type="text" id="regName" placeholder="Your Full Name">
+        <input type="password" id="regPassword" placeholder="Password">
+        <button onclick="register()" id="regBtn">📝 Register</button>
+        
+        <hr style="margin: 20px 0;">
+        
+        <h3>Login Existing Account</h3>
+        <input type="text" id="loginId" placeholder="5-digit ID">
+        <input type="password" id="loginPassword" placeholder="Password">
+        <button onclick="login()" id="loginBtn">🔐 Login</button>
+    </div>
+
+    <div class="container" id="appArea">
+        <div class="tab">
+            <button onclick="showTab('users')" id="tabUsers">👥 All Users</button>
+            <button onclick="showTab('chat')" id="tabChat">💬 Chat</button>
+        </div>
+        
+        <div id="usersArea">
+            <h3>All Registered Users</h3>
+            <div id="usersList" class="user-list">Loading users...</div>
+        </div>
+        
+        <div id="chatArea">
+            <h3>Chat with: <span id="chatWithName">Select a user</span></h3>
+            <p>Their ID: <strong id="chatWithId"></strong></p>
+            <div id="messages"></div>
+            <input type="text" id="messageInput" placeholder="Type message...">
+            <button onclick="sendMessage()">📤 Send Message</button>
+        </div>
+        
+        <button class="logout-btn" onclick="logout()">🚪 Logout</button>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        let socket = null;
+        let currentUser = null;
+        let selectedUser = null;
+        let allUsers = [];
+
+        function showMessage(msg, type) {
+            const div = document.getElementById('statusMessage');
+            if (div) {
+                div.innerHTML = `<div class="${type}">${msg}</div>`;
+                setTimeout(() => div.innerHTML = '', 3000);
+            }
+        }
+
+        async function register() {
+            const name = document.getElementById('regName').value.trim();
+            const password = document.getElementById('regPassword').value;
+            
+            if (!name || !password) {
+                showMessage('❌ Please enter both name and password', 'error');
+                return;
+            }
+            
+            const btn = document.getElementById('regBtn');
+            btn.disabled = true;
+            btn.textContent = 'Registering...';
+            
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, password })
+                });
+                
+                const data = await res.json();
+                console.log('Register response:', data);
+                
+                if (data.success) {
+                    showMessage(`✅ Success! Your 5-digit ID is: ${data.uniqueId}. Save this number!`, 'success');
+                    document.getElementById('loginId').value = data.uniqueId;
+                    document.getElementById('regName').value = '';
+                    document.getElementById('regPassword').value = '';
+                } else {
+                    showMessage('❌ Registration failed: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (err) {
+                showMessage('❌ Network error: ' + err.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📝 Register';
+            }
+        }
+
+        async function login() {
+            const uniqueId = document.getElementById('loginId').value.trim();
+            const password = document.getElementById('loginPassword').value;
+            
+            if (!uniqueId || !password) {
+                alert('Please enter both ID and password');
+                return;
+            }
+            
+            const btn = document.getElementById('loginBtn');
+            btn.disabled = true;
+            btn.textContent = 'Logging in...';
+            
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uniqueId, password })
+                });
+                
+                const data = await res.json();
+                console.log('Login response:', data);
+                
+                if (data.success) {
+                    localStorage.setItem('token', data.token);
+                    currentUser = data;
+                    document.getElementById('loginArea').style.display = 'none';
+                    document.getElementById('appArea').style.display = 'block';
+                    showTab('users');
+                    connectSocket();
+                    await loadAllUsers();
+                } else {
+                    alert('❌ Login failed! Wrong ID or password');
+                }
+            } catch (err) {
+                alert('❌ Network error: ' + err.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔐 Login';
+            }
+        }
+
+        function connectSocket() {
+            const token = localStorage.getItem('token');
+            socket = io({
+                auth: { token },
+                transports: ['websocket', 'polling']
+            });
+            
+            socket.on('connect', () => {
+                console.log('Socket connected');
+            });
+            
+            socket.on('receive-message', (msg) => {
+                if (selectedUser && selectedUser.uniqueId === msg.fromId) {
+                    displayMessage(msg.fromId, msg.message, false);
+                }
+            });
+            
+            socket.on('connect_error', (err) => {
+                console.log('Socket error:', err.message);
+            });
+        }
+
+        async function loadAllUsers() {
+            try {
+                const token = localStorage.getItem('token');
+                const res = await fetch('/api/all-users', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const users = await res.json();
+                allUsers = users.filter(u => u.uniqueId !== currentUser.uniqueId);
+                displayUsersList();
+            } catch (err) {
+                console.log('Error loading users:', err);
+            }
+        }
+
+        function displayUsersList() {
+            const container = document.getElementById('usersList');
+            if (!container) return;
+            
+            if (allUsers.length === 0) {
+                container.innerHTML = '<p>No other users found. Share this app with friends!</p>';
+                return;
+            }
+            
+            container.innerHTML = allUsers.map(user => `
+                <div class="user-item" onclick="selectUser('${user.uniqueId}', '${user.name}')">
+                    <strong>${user.name}</strong><br>
+                    <small>ID: ${user.uniqueId}</small>
+                </div>
+            `).join('');
+        }
+
+        function selectUser(uniqueId, name) {
+            selectedUser = { uniqueId, name };
+            document.getElementById('chatWithName').innerHTML = name;
+            document.getElementById('chatWithId').innerHTML = uniqueId;
+            showTab('chat');
+            loadChatHistory();
+        }
+
+        async function loadChatHistory() {
+            if (!selectedUser) return;
+            
+            const token = localStorage.getItem('token');
+            const res = await fetch('/api/messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ fromId: currentUser.uniqueId, toId: selectedUser.uniqueId })
+            });
+            
+            const messages = await res.json();
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.innerHTML = '';
+            
+            messages.forEach(msg => {
+                const isMine = msg.fromId === currentUser.uniqueId;
+                displayMessage(msg.fromId, msg.message, isMine);
+            });
+        }
+
+        async function sendMessage() {
+            const message = document.getElementById('messageInput').value.trim();
+            if (!selectedUser) {
+                alert('Please select a user to chat with');
+                return;
+            }
+            if (!message) {
+                alert('Please enter a message');
+                return;
+            }
+            
+            socket.emit('send-message', { toId: selectedUser.uniqueId, message });
+            displayMessage(currentUser.uniqueId, message, true);
+            document.getElementById('messageInput').value = '';
+            
+            const token = localStorage.getItem('token');
+            await fetch('/api/save-message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ toId: selectedUser.uniqueId, message })
+            });
+        }
+
+        function displayMessage(senderId, message, isMine) {
+            const messagesDiv = document.getElementById('messages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${isMine ? 'my-message' : ''}`;
+            const sender = isMine ? 'You' : (allUsers.find(u => u.uniqueId === senderId)?.name || senderId);
+            msgDiv.innerHTML = `<strong>${sender}:</strong> ${message}`;
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function showTab(tab) {
+            if (tab === 'users') {
+                document.getElementById('usersArea').style.display = 'block';
+                document.getElementById('chatArea').style.display = 'none';
+                document.getElementById('tabUsers').classList.add('active');
+                document.getElementById('tabChat').classList.remove('active');
+                loadAllUsers();
+            } else {
+                document.getElementById('usersArea').style.display = 'none';
+                document.getElementById('chatArea').style.display = 'block';
+                document.getElementById('tabChat').classList.add('active');
+                document.getElementById('tabUsers').classList.remove('active');
+                if (selectedUser) loadChatHistory();
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem('token');
+            if (socket) socket.disconnect();
+            location.reload();
+        }
+    </script>
+</body>
+</html>
